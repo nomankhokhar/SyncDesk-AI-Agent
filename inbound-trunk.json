@@ -1,0 +1,7 @@
+{
+  "trunk": {
+    "name": "Telnyx inbound",
+    "numbers": ["${SIP_FROM_NUMBER}"],
+    "krispEnabled": true
+  }
+}

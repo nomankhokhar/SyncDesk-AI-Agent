@@ -1,0 +1,9 @@
+{
+  "trunk": {
+    "name": "Telnyx outbound",
+    "address": "sip.telnyx.com",
+    "numbers": ["${SIP_FROM_NUMBER}"],
+    "authUsername": "${TELNYX_SIP_USERNAME}",
+    "authPassword": "${TELNYX_SIP_PASSWORD}"
+  }
+}
