@@ -1,20 +1,22 @@
-# LiveKit Phone Agent (Node.js)
+# LiveKit Phone Agent — AI Receptionist (Node.js)
 
-One AI voice agent that both **answers** and **makes** phone calls on +1-562-605-0826 via Telnyx SIP trunking + LiveKit.
+An AI **receptionist** that both **answers** and **makes** phone calls on +1-562-605-0826 via Telnyx SIP trunking + LiveKit. It books, cancels, and looks up reservations through the Go booking service in [`../booking`](../booking) — connected over **MCP**, so every tool the booking MCP server publishes is available to the agent automatically (see `src/booking-mcp.ts`).
 
 Architecture:
 
 ```
 INBOUND:  Caller -> Telnyx number -> Telnyx SIP connection -> LiveKit SIP -> Room -> Agent
 OUTBOUND: make-call.ts -> dispatch agent -> Agent dials via LiveKit SIP -> sip.telnyx.com -> Callee
+BOOKING:  Agent -> MCP (stdio, auto-spawned) -> booking/cmd/mcp -> Booking REST API (:8080)
 ```
 
 ## Prerequisites
 
 - Node.js 20+
+- Go 1.22+ (runs the booking API + MCP server in `../booking`)
 - LiveKit Cloud account (free tier is fine) -> https://cloud.livekit.io
 - LiveKit CLI: `brew install livekit-cli` (or `curl -sSL https://get.livekit.io/cli | bash`)
-- API keys: Deepgram (STT), OpenAI (LLM), Cartesia (TTS)
+- API keys: Deepgram (STT), Anthropic (LLM), Cartesia (TTS)
 - Telnyx account with the number +1-562-605-0826
 
 ## Step 1 — Telnyx SIP Connection
@@ -65,7 +67,21 @@ This creates, in order:
 
 The last step prints a trunk ID like `ST_xxxx` — put it in `.env` as `SIP_OUTBOUND_TRUNK_ID`.
 
-## Step 5 — Run the agent
+## Step 5 — Start the booking API
+
+The receptionist's reservation tools live in the Go booking service:
+
+```bash
+cd ../booking && go run ./cmd/api   # REST API on :8080
+```
+
+The agent spawns the booking **MCP server** (`go run ./cmd/mcp`) by itself on
+each call — you only need the API running. Optional `.env` overrides:
+`BUSINESS_NAME` (receptionist's business name), `BOOKING_API_URL`,
+`BOOKING_MCP_CMD`, `BOOKING_MCP_CWD`. If the booking API is down, the agent
+still answers and apologizes instead of crashing.
+
+## Step 6 — Run the agent
 
 ```bash
 npm install
@@ -77,12 +93,12 @@ Keep this running — it's the worker that handles all calls.
 
 ## Test it
 
-**Receive a call:** dial **+1-562-605-0826** from your phone. The agent picks up and greets you.
+**Receive a call:** dial **+1-562-605-0826** from your phone. The receptionist picks up — try "I'd like to book a table for two tomorrow at seven" or "cancel my reservation".
 
 **Make a call:** in a second terminal:
 
 ```bash
-npm run call -- +923100660762
+npm run call -- +923101234567
 ```
 
 The agent dials that number and starts talking when answered.
@@ -92,7 +108,8 @@ The agent dials that number and starts talking when answered.
 - **Inbound call gets busy tone / drops** → check the dispatch rule exists (`lk sip dispatch list`), the agent worker is running with the exact name `phone-agent`, and the number is assigned to the Telnyx SIP connection with the LiveKit FQDN.
 - **Outbound fails with 404 "object cannot be found"** → `SIP_OUTBOUND_TRUNK_ID` in `.env` doesn't match a real trunk — check `lk sip outbound list`.
 - **Outbound fails with 403** → wrong SIP username/password, no Outbound Voice Profile attached to the Telnyx connection, or the profile doesn't allow the destination country.
-- **Agent answers but is silent** → missing/invalid Deepgram, OpenAI, or Cartesia key.
+- **Agent answers but is silent** → missing/invalid Deepgram, Anthropic, or Cartesia key.
+- **Agent says the booking system is unavailable** → the booking API isn't running (`cd ../booking && go run ./cmd/api`) or `BOOKING_API_URL` points to the wrong port.
 
 ## Security
 
@@ -100,4 +117,4 @@ Never commit `.env` or put your Telnyx SIP password in code or chats. All secret
 
 ## Customizing
 
-The agent's personality/behavior is the `instructions` string in `src/agent.ts`. You can also add tools (booking, lookups, transfers) via `llm.tool()` — see https://docs.livekit.io/agents/
+The receptionist's personality/behavior is the `instructions` string in `src/agent.ts`. Reservation tools are **not** defined here — they're discovered from the booking MCP server at call time (`src/booking-mcp.ts`), so adding a tool in `booking/cmd/mcp/main.go` makes it available to the receptionist with no Node.js changes. Extra local tools (transfers, etc.) can still be added via `llm.tool()` — see https://docs.livekit.io/agents/

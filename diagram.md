@@ -1,102 +1,182 @@
-# LiveKit Phone Agent — Architecture & Flow
+# SyncDesk AI Agent — System Design
 
-An AI phone agent built on **LiveKit + Telnyx** — a single voice bot that both **answers** calls to +1‑562‑605‑0826 and **places** outbound calls, speaking with Claude's brain and Cartesia's voice.
+An AI **receptionist** built on **LiveKit + Telnyx** that answers and places phone calls on +1‑562‑605‑0826, and manages reservations through a **Go booking service** connected over **MCP**.
 
-## The pieces
-
-| File | Role |
-|---|---|
-| `src/agent.ts` | The worker. Defines the voice agent, handles both inbound and outbound calls, registered under the name `phone-agent` |
-| `src/make-call.ts` | CLI trigger for outbound calls (`npm run call -- +1...`) |
-| `inbound-trunk.json` | LiveKit SIP config: accept calls arriving for +15626050826 (Krisp noise cancellation on) |
-| `outbound-trunk.json` | LiveKit SIP config: dial out through `sip.telnyx.com` with the Telnyx SIP credentials |
-| `dispatch-rule.json` | Tells LiveKit: every incoming call gets its own room (`call-xxxx`) and auto-dispatches the `phone-agent` into it |
-
-## The voice pipeline (per call)
-
-Every call runs the same real-time loop (`src/agent.ts:64-82`):
+## 1. High-level system design
 
 ```
-Caller audio → Silero VAD (detects speech) → Deepgram nova-3 (speech→text)
-            → Claude Haiku 4.5 (generates reply)
-            → Cartesia sonic-3 "Katie" voice (text→speech) → Caller
+                 ┌─────────────────────── TELEPHONY ───────────────────────┐
+                 │                                                         │
+ ┌────────┐ PSTN │ ┌────────────┐        ┌──────────────────────────┐      │
+ │ Caller │◄────►│ │   Telnyx   │◄──SIP──►│      LiveKit Cloud      │      │
+ └────────┘      │ │ (number +  │        │  inbound/outbound trunks │      │
+                 │ │ SIP trunk) │        │  dispatch rule → rooms   │      │
+                 │ └────────────┘        └────────────┬─────────────┘      │
+                 └───────────────────────────────────┼─────────────────────┘
+                                                     │ WebRTC (audio)
+                 ┌─────────────────── AI AGENT ──────▼─────────────────────┐
+                 │  phone-agent/  (Node.js worker, name: "phone-agent")    │
+                 │                                                         │
+                 │  Silero VAD → Deepgram nova-3 (STT)                     │
+                 │             → Claude Haiku 4.5 (LLM)                    │
+                 │             → Cartesia sonic-3 (TTS)                    │
+                 │                                                         │
+                 │  Tools: endCall + everything the MCP server publishes   │
+                 └────────────────────────┬────────────────────────────────┘
+                                          │ MCP (stdio, auto-spawned per call)
+                 ┌────────────────────────▼──────────────────────────────────┐
+                 │  booking/  (Go)                                           │
+                 │  cmd/mcp (MCP server) ──HTTP──► cmd/api (Gin REST :8080)  │
+                 │  controllers → services → storage (in-memory)             │
+                 └───────────────────────────────────────────────────────────┘
 ```
-
-Notes on the pipeline:
-
-- **LLM is Claude** (`claude-haiku-4-5`), reached through Anthropic's OpenAI-compatible endpoint (`baseURL: https://api.anthropic.com/v1/`) because LiveKit has no Node.js Anthropic plugin. Haiku is the fastest/cheapest Claude — right for real-time voice.
-- **The agent has one tool, `endCall`** — Claude can hang up on its own after saying goodbye (deletes the room after a 2s grace period for the TTS to finish).
-- The greeting turns pass a synthetic user message (e.g. `[Incoming call connected…]`) because Anthropic requires at least one non-system message per request.
-- The VAD model is loaded once per process in `prewarm` so new calls connect fast.
-
-## Architecture / flow diagram
-
-```
-                            ┌──────────────────────────────────────────────┐
-                            │                LiveKit Cloud                 │
-                            │                                              │
- INBOUND                    │  ┌───────────┐   ┌───────────────────┐       │
- ┌────────┐   PSTN   ┌──────┴─┐│  Inbound  │   │  Dispatch rule    │       │
- │ Caller │ ───────► │ Telnyx ││  SIP trunk│──►│  room "call-xxxx" │       │
- └────────┘  dials   │  SIP   ││(+1562...) │   │  + agent          │       │
-             number  │ connec-│└───────────┘   └────────┬──────────┘       │
-                     │  tion  │                         ▼                  │
-                     │ (FQDN) │                ┌─────────────────┐         │
-                     └──────┬─┘                │      Room       │         │
-                            │                  │ caller ↔ agent  │         │
-                            │                  └────────▲────────┘         │
-                            │                           │ joins            │
-                            └───────────────────────────┼──────────────────┘
-                                                        │
-                                          ┌─────────────┴─────────────┐
-                                          │  src/agent.ts worker      │
-                                          │  ("phone-agent")          │
-                                          │  VAD → Deepgram → Claude  │
-                                          │  → Cartesia  (+ endCall)  │
-                                          └─────────────▲─────────────┘
-                                                        │ dispatch w/ metadata
- OUTBOUND                                               │ { phoneNumber }
- ┌──────────────────┐ createDispatch(room,"phone-agent")│
- │ src/make-call.ts │ ──────────────────────────────────┘
- └──────────────────┘
-        then agent calls createSipParticipant(SIP_OUTBOUND_TRUNK_ID, number)
-        → LiveKit SIP → sip.telnyx.com (credential auth) → PSTN → Callee joins room
-```
-
-### Mermaid version
 
 ```mermaid
-flowchart TB
-    subgraph Inbound["INBOUND flow"]
-        Caller([Caller]) -->|dials +1-562-605-0826| TelnyxIn[Telnyx SIP connection<br/>FQDN → LiveKit SIP]
-        TelnyxIn --> InTrunk[LiveKit inbound SIP trunk]
-        InTrunk --> Rule[Dispatch rule<br/>room call-xxxx + phone-agent]
-        Rule --> Room1[Room: caller ↔ agent]
-    end
+flowchart LR
+    Caller([📞 Caller / Callee])
+    Telnyx[Telnyx<br/>number + SIP connection]
+    LK[LiveKit Cloud<br/>SIP trunks · dispatch rule · rooms]
+    Agent[phone-agent worker<br/>VAD → STT → Claude → TTS]
+    MCP[booking/cmd/mcp<br/>MCP server]
+    API[booking/cmd/api<br/>Gin REST API :8080]
+    DB[(in-memory store)]
 
-    subgraph Outbound["OUTBOUND flow"]
-        CLI[src/make-call.ts<br/>npm run call -- +1...] -->|createDispatch + metadata phoneNumber| Room2[Room: outbound-timestamp]
-        Room2 --> Dial[agent: createSipParticipant]
-        Dial -->|LiveKit outbound SIP trunk| TelnyxOut[sip.telnyx.com<br/>credential auth]
-        TelnyxOut -->|PSTN| Callee([Callee])
-    end
-
-    Worker["src/agent.ts worker (phone-agent)<br/>Silero VAD → Deepgram nova-3 → Claude Haiku 4.5 → Cartesia sonic-3 Katie<br/>tool: endCall (agent can hang up)"]
-    Room1 <--> Worker
-    Room2 <--> Worker
+    Caller <-->|PSTN| Telnyx <-->|SIP| LK <-->|WebRTC audio| Agent
+    Agent <-->|MCP stdio<br/>tool calls| MCP <-->|HTTP JSON| API --> DB
 ```
 
-## The two flows in detail
+## 2. Inbound call — from ring to booked table
 
-**Inbound** — Someone dials the Telnyx number. The Telnyx SIP connection (FQDN type, pointed at the LiveKit project SIP URI) forwards the call to LiveKit. The inbound trunk accepts it, the dispatch rule creates a fresh room and dispatches `phone-agent`. The job metadata is empty, so `isOutbound` is false and the agent greets the caller immediately.
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Caller
+    participant T as Telnyx
+    participant L as LiveKit Cloud
+    participant A as phone-agent
+    participant M as MCP server (Go)
+    participant B as Booking API
 
-**Outbound** — You run `npm run call -- +923100660762`. `src/make-call.ts` creates a dispatch to a new room named `outbound-<timestamp>` with `{ phoneNumber }` as metadata. The same agent wakes up, sees the phone number, and calls `createSipParticipant` — LiveKit dials out through `sip.telnyx.com` using the trunk's SIP credentials. `waitUntilAnswered: true` blocks until pickup, then the agent introduces itself; on busy/no-answer it deletes the room so the worker doesn't hang.
+    C->>T: dials +1-562-605-0826
+    T->>L: SIP INVITE (FQDN → LiveKit SIP)
+    L->>L: inbound trunk accepts,<br/>dispatch rule creates room "call-xxxx"
+    L->>A: dispatch job (empty metadata → inbound)
+    A->>M: spawn cmd/mcp + initialize (stdio)
+    M-->>A: tools: create/cancel/list_reservations,<br/>get_booking_analysis
+    A->>C: "Thanks for calling SyncDesk — how can I help?"
 
-## Key design choices
+    loop every conversation turn
+        C->>A: speech
+        A->>A: VAD → Deepgram (STT) → Claude
+        alt Claude decides to use a booking tool
+            A->>M: tools/call (e.g. create_reservation)
+            M->>B: HTTP (e.g. POST /api/reservations)
+            B-->>M: JSON result / validation error
+            M-->>A: tool result
+            A->>A: Claude summarizes result naturally
+        end
+        A->>C: Cartesia TTS reply
+    end
 
-- **Named agent** (`agentName: 'phone-agent'`): the agent only joins rooms it's explicitly dispatched to — by the dispatch rule (inbound) or by make-call.ts (outbound). The name must match in `src/agent.ts`, `dispatch-rule.json`, and `src/make-call.ts`.
-- **Claude via OpenAI-compat layer**: two Anthropic-specific requirements are handled in code — the `tools` list must not be empty (solved by the real `endCall` tool) and every request needs at least one user message (solved by synthetic user input on greeting turns).
+    C->>A: "That's all, thanks!"
+    A->>A: Claude calls endCall tool
+    A->>L: deleteRoom (after 2s TTS grace)
+    L->>T: hang up
+```
 
-## Environment variables (`.env`)
+## 3. Outbound call
 
-`LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `SIP_OUTBOUND_TRUNK_ID` (from `lk sip outbound create`), `SIP_FROM_NUMBER`, `ANTHROPIC_API_KEY` (LLM), `DEEPGRAM_API_KEY` (STT), `CARTESIA_API_KEY` (TTS).
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as npm run call -- +92...
+    participant L as LiveKit Cloud
+    participant A as phone-agent
+    participant T as Telnyx
+    participant C as Callee
+
+    U->>L: createDispatch(room "outbound-<ts>",<br/>metadata {phoneNumber})
+    L->>A: dispatch job (metadata has number → outbound)
+    A->>A: connect booking MCP (same as inbound)
+    A->>L: createSipParticipant(trunk, number,<br/>waitUntilAnswered)
+    L->>T: SIP dial via sip.telnyx.com<br/>(credential auth)
+    T->>C: PSTN ring
+    alt answered
+        C-->>A: audio connected
+        A->>C: greets, introduces itself,<br/>states reason for calling
+    else busy / no answer / rejected
+        A->>L: deleteRoom (worker doesn't hang)
+    end
+```
+
+## 4. Receptionist decision flow — all conversation paths
+
+```mermaid
+flowchart TD
+    Start([Call connected]) --> Greet[Greet as BUSINESS_NAME receptionist]
+    Greet --> Intent{Caller intent?}
+
+    Intent -->|book a table| Collect[Collect: name, phone,<br/>party size, date, time, notes]
+    Collect --> Norm[Resolve relative dates<br/>tomorrow → YYYY-MM-DD, 7pm → 19:00]
+    Norm --> Confirm{Caller confirms<br/>details?}
+    Confirm -->|no| Collect
+    Confirm -->|yes| Create[MCP: create_reservation]
+    Create -->|201 created| Done[Give reservation ID,<br/>anything else?]
+    Create -->|400 bad date/time| Fix[Apologize, re-ask,<br/>retry tool]
+    Fix --> Create
+
+    Intent -->|cancel| Find[MCP: list_reservations]
+    Find --> Which{Booking found &<br/>confirmed with caller?}
+    Which -->|yes| Cancel[MCP: cancel_reservation by ID]
+    Which -->|not found| Sorry[Apologize — no matching booking]
+    Cancel -->|200| Done
+    Cancel -->|already cancelled / 404| Sorry
+    Sorry --> Done
+
+    Intent -->|questions: bookings,<br/>busy days, stats| Query[MCP: list_reservations /<br/>get_booking_analysis]
+    Query --> Summarize[Summarize naturally —<br/>never read raw JSON]
+    Summarize --> Done
+
+    Intent -->|wants a human| Human[Noman will call back]
+    Human --> Done
+
+    Intent -->|booking system down| Apologize[Apologize, offer callback<br/>from Noman]
+    Apologize --> Done
+
+    Done -->|more requests| Intent
+    Done -->|goodbye| End[endCall tool →<br/>deleteRoom after 2s]
+    End --> Hangup([Call ends])
+```
+
+## 5. MCP tool bridge — how tools reach the receptionist
+
+```mermaid
+flowchart LR
+    subgraph Node["phone-agent (per call)"]
+        E[entry] --> BM[booking-mcp.ts:<br/>spawn + connect MCP client]
+        BM --> LT[listTools]
+        LT --> Reg["each MCP tool → llm.tool()<br/>(JSON Schema passed straight through)"]
+        Reg --> Claude[Claude sees tools:<br/>create/cancel/list_reservations,<br/>get_booking_analysis, endCall]
+    end
+    subgraph Go["booking (Go)"]
+        MCPS[cmd/mcp] --> REST[cmd/api REST]
+        REST --> SVC[services: validation,<br/>analysis logic]
+        SVC --> ST[(storage)]
+    end
+    Claude -->|tools/call| MCPS
+```
+
+Add a tool in `booking/cmd/mcp/main.go` → it appears to the receptionist automatically. If the MCP server can't start (booking API down), the agent still answers and apologizes.
+
+## 6. Key design decisions
+
+| Decision | Why |
+|---|---|
+| Named agent (`phone-agent`) | Explicit dispatch only — joins rooms via dispatch rule (inbound) or make-call.ts (outbound). Name must match in `agent.ts`, `dispatch-rule.json`, `make-call.ts` |
+| Claude via OpenAI-compat endpoint | LiveKit has no Node.js Anthropic plugin; requires ≥1 user message (synthetic greeting input) and a non-empty tool list (endCall) |
+| Static TTS greeting (`session.say`) | Skips an LLM round-trip on call pickup — caller hears the greeting in ~1 s instead of ~15 s. (LiveKit Inference stack — Gemini Flash-Lite + Rime — was benchmarked and reverted: ~400 ms/turn slower from a non-US worker.) |
+| MCP between agent and booking | Tools are discovered at call time, not hardcoded — Go and Node.js sides evolve independently |
+| MCP server as thin HTTP client | One source of truth (REST API); same tools usable from Claude Desktop / Claude Code directly |
+| Validation in Go service layer | Bad dates/times return errors the LLM can read, apologize for, and retry |
+| In-memory store behind `storage.Store` | Demo-simple; swap for a DB by reimplementing four methods |
+| Config env-only, JSONs are templates | No credentials in git — `setup-sip.ts` renders `${VAR}` placeholders from `.env` |
