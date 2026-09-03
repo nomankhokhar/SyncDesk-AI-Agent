@@ -1,18 +1,14 @@
 import 'dotenv/config';
 import {
   type JobContext,
-  type JobProcess,
   WorkerOptions,
   cli,
   defineAgent,
+  inference,
   llm,
   metrics,
   voice,
 } from '@livekit/agents';
-import * as deepgram from '@livekit/agents-plugin-deepgram';
-import * as openai from '@livekit/agents-plugin-openai';
-import * as cartesia from '@livekit/agents-plugin-cartesia';
-import * as silero from '@livekit/agents-plugin-silero';
 import { SipClient } from 'livekit-server-sdk';
 import { fileURLToPath } from 'node:url';
 import { connectBookingTools } from './booking-mcp.js';
@@ -23,17 +19,21 @@ import { connectBookingTools } from './booking-mcp.js';
 //  - OUTBOUND: make-call.ts dispatches with { phoneNumber } metadata
 // Reservations are managed through the Go booking MCP server
 // (booking/cmd/mcp -> booking REST API) — see booking-mcp.ts.
-// Pipeline: Silero VAD -> Deepgram nova-3 -> Claude Haiku 4.5 -> Cartesia sonic-3
+//
+// Speech stack — all via LiveKit Cloud Inference (one gateway, auth by the
+// LIVEKIT_* keys, no per-provider keys). Best latency when the worker runs
+// near the gateway (US); from far away the gateway hop adds ~1s.
+//   bundled Silero VAD
+//   -> Deepgram Flux (STT)      — end-of-turn detection server-side, so
+//      `endpoint` + `stt` latency is ~0
+//   -> Gemma 4 31B (LLM)        — livekit.com/products/inference/gemma-4
+//   -> Rime Mist v3 (TTS)
+// Overrides: STT_MODEL / LLM_MODEL / TTS_MODEL / TTS_VOICE.
 // ─────────────────────────────────────────────────────────────
 
 const BUSINESS_NAME = process.env.BUSINESS_NAME ?? 'SyncDesk';
 
 export default defineAgent({
-  prewarm: async (proc: JobProcess) => {
-    // Load VAD once per process so sessions start fast
-    proc.userData.vad = await silero.VAD.load();
-  },
-
   entry: async (ctx: JobContext) => {
     await ctx.connect();
 
@@ -93,25 +93,28 @@ ${isOutbound ? '- You initiated this call. After introducing yourself, state the
       ],
     });
 
+    const tts = new inference.TTS({
+      model: process.env.TTS_MODEL ?? 'rime/mistv3',
+      voice: process.env.TTS_VOICE ?? 'cove',
+    });
+    tts.prewarm(); // open the gateway websocket now so the greeting isn't cold
+
     const session = new voice.AgentSession({
-      vad: ctx.proc.userData.vad as silero.VAD,
-      stt: new deepgram.STT({ model: 'nova-3' }),
-      // Claude via Anthropic's OpenAI-compatible endpoint (LiveKit has no
-      // Node.js Anthropic plugin and Claude isn't on LiveKit Inference)
-      llm: new openai.LLM({
-        model: 'claude-haiku-4-5',
-        apiKey: process.env.ANTHROPIC_API_KEY,
-        baseURL: 'https://api.anthropic.com/v1/',
+      // VAD omitted → AgentSession auto-loads the bundled Silero VAD.
+      stt: new inference.STT({
+        model: process.env.STT_MODEL ?? 'deepgram/flux-general-en',
       }),
-      // Cartesia sonic-3 "Katie" — conversational en-US voice
-      tts: new cartesia.TTS({
-        voice: 'f786b574-daa5-4673-aa0c-cbe3e8534c02',
+      // Gemma 4 (31B) via LiveKit Inference — https://livekit.com/products/inference/gemma-4
+      llm: new inference.LLM({
+        model: process.env.LLM_MODEL ?? 'google/gemma-4-31b-it',
       }),
-      // Turn-taking. Fixed endpointing: dynamic mode anchored its EMA at
-      // ~950ms and never shrank for confident "yes"/"bye" turns. Fixed =
-      // max(VAD silence, minDelay), capped at maxDelay — measured ~350-500ms.
+      tts,
+      // Deepgram Flux detects end-of-turn server-side — trust its signal
+      // instead of the separate VAD turn-detector wait. minDelay 0 = no
+      // extra pad on top of Flux's own eot_timeout.
       turnHandling: {
-        endpointing: { mode: 'fixed', minDelay: 300, maxDelay: 800 },
+        turnDetection: 'stt',
+        endpointing: { mode: 'fixed', minDelay: 0, maxDelay: 800 },
       },
     });
 
@@ -119,12 +122,12 @@ ${isOutbound ? '- You initiated this call. After introducing yourself, state the
     // LATENCY INSTRUMENTATION
     // Per user turn, the caller's perceived lag = time from "caller stopped
     // talking" to "agent starts talking". LiveKit reports it in pieces:
-    //   endpoint  — waiting to be sure the caller finished (turnHandling knob)
-    //   stt       — end of speech → final transcript (Deepgram)
-    //   llm-ttft  — transcript → Claude's first token (network + model)
-    //   tts-ttfb  — text → Cartesia's first audio byte
-    // The line prints when the agent begins speaking. `go build` / region /
-    // prompt-caching changes should move llm-ttft; endpointing is yours to tune.
+    //   endpoint  — pad after Flux's end-of-turn signal (minDelay, now 0)
+    //   stt       — end of speech → final transcript (Deepgram Flux)
+    //   llm-ttft  — transcript → LLM first token (network + model)
+    //   tts-ttfb  — text → Rime's first audio byte
+    // The line prints when the agent begins speaking. Worker region is the
+    // big lever on llm-ttft / tts-ttfb (gateway hop); endpointing is yours.
     // ─────────────────────────────────────────────────────────────
     const turn: Record<string, Partial<Record<string, number>>> = {};
     const done = new Set<string>();
