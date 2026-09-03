@@ -172,7 +172,13 @@ ${isOutbound ? '- You initiated this call. After introducing yourself, state the
       }
     });
 
-    await session.start({ agent, room: ctx.room });
+    await session.start({
+      agent,
+      room: ctx.room,
+      // Caller hangs up -> close the session and delete the room immediately
+      // (no lingering rooms in the dashboard's live-call list).
+      inputOptions: { deleteRoomOnClose: true },
+    });
 
     if (isOutbound) {
       // ── OUTBOUND: dial the number and wait for pickup ──
