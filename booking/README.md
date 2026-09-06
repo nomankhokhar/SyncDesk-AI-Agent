@@ -36,15 +36,17 @@ go run ./cmd/mcp
 
 ## REST API
 
-| Method | Path                        | Description               |
-|--------|-----------------------------|---------------------------|
-| GET    | /api/reservations           | List all reservations     |
-| GET    | /api/reservations/:id       | Get one reservation       |
-| POST   | /api/reservations           | Create a reservation      |
-| POST   | /api/reservations/:id/cancel| Cancel a reservation      |
-| GET    | /api/analysis               | Booking statistics        |
+| Method | Path                        | Description                          |
+|--------|-----------------------------|--------------------------------------|
+| GET    | /api/reservations           | List all reservations                |
+| GET    | /api/reservations/:id       | Get one reservation                  |
+| POST   | /api/reservations           | Create a reservation                 |
+| PUT    | /api/reservations/:id       | Edit a reservation (full replace)    |
+| DELETE | /api/reservations/:id       | Delete a reservation (204)           |
+| POST   | /api/reservations/:id/cancel| Cancel a reservation (keeps the row) |
+| GET    | /api/analysis               | Booking statistics                   |
 
-Create payload:
+Create / update payload (same shape):
 
 ```json
 {
@@ -63,6 +65,7 @@ Create payload:
 |-----------------------|---------------------------------------------------|
 | `list_reservations`   | List all reservations                             |
 | `create_reservation`  | Book a reservation (name, phone, party size, date, time, notes) |
+| `update_reservation`  | Change a reservation by ID (full replace)         |
 | `cancel_reservation`  | Cancel by reservation ID                          |
 | `get_booking_analysis`| Totals, cancellations, guests, avg party size, busiest date |
 

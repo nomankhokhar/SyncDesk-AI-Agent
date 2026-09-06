@@ -107,6 +107,31 @@ func main() {
 	)
 
 	s.AddTool(
+		mcp.NewTool("update_reservation",
+			mcp.WithDescription("Change an existing reservation (party size, date, time, name, phone, notes) by its ID. All fields are replaced."),
+			mcp.WithNumber("id", mcp.Required(), mcp.Description("Reservation ID")),
+			mcp.WithString("customer_name", mcp.Required(), mcp.Description("Customer full name")),
+			mcp.WithString("phone", mcp.Required(), mcp.Description("Customer phone number in E.164 format")),
+			mcp.WithNumber("party_size", mcp.Required(), mcp.Description("Number of guests")),
+			mcp.WithString("date", mcp.Required(), mcp.Description("Reservation date, YYYY-MM-DD")),
+			mcp.WithString("time", mcp.Required(), mcp.Description("Reservation time, HH:MM 24h")),
+			mcp.WithString("notes", mcp.Description("Optional special requests")),
+		),
+		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			id := req.GetInt("id", 0)
+			payload := map[string]any{
+				"customer_name": req.GetString("customer_name", ""),
+				"phone":         req.GetString("phone", ""),
+				"party_size":    req.GetInt("party_size", 0),
+				"date":          req.GetString("date", ""),
+				"time":          req.GetString("time", ""),
+				"notes":         req.GetString("notes", ""),
+			}
+			return asResult(callAPI(http.MethodPut, fmt.Sprintf("/reservations/%d", id), payload))
+		},
+	)
+
+	s.AddTool(
 		mcp.NewTool("cancel_reservation",
 			mcp.WithDescription("Cancel an existing reservation by its ID."),
 			mcp.WithNumber("id", mcp.Required(), mcp.Description("Reservation ID")),

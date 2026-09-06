@@ -68,6 +68,37 @@ func (s *ReservationService) Create(req models.CreateReservationRequest) (models
 	}), nil
 }
 
+// Update replaces the mutable fields of an existing reservation. ID, CreatedAt
+// and Status are preserved. Date and time are validated as in Create.
+func (s *ReservationService) Update(id int, req models.CreateReservationRequest) (models.Reservation, error) {
+	r, ok := s.store.Get(id)
+	if !ok {
+		return models.Reservation{}, ErrNotFound
+	}
+	if _, err := time.Parse("2006-01-02", req.Date); err != nil {
+		return models.Reservation{}, ErrBadDate
+	}
+	if _, err := time.Parse("15:04", req.Time); err != nil {
+		return models.Reservation{}, ErrBadTime
+	}
+	r.CustomerName = req.CustomerName
+	r.Phone = req.Phone
+	r.PartySize = req.PartySize
+	r.Date = req.Date
+	r.Time = req.Time
+	r.Notes = req.Notes
+	s.store.Update(r)
+	return r, nil
+}
+
+// Delete permanently removes a reservation.
+func (s *ReservationService) Delete(id int) error {
+	if !s.store.Delete(id) {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *ReservationService) Cancel(id int) (models.Reservation, error) {
 	r, ok := s.store.Get(id)
 	if !ok {

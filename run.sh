@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Dev runner for SyncDesk: builds + starts the Go booking API and the
-# LiveKit phone agent together, and tears both down on Ctrl-C.
+# Dev runner for SyncDesk: builds + starts the Go booking API, the LiveKit
+# phone agent, and (if installed) the dashboard, tearing them down on Ctrl-C.
 #
 #   ./run.sh                     # build + run
 #   ./run.sh --no-build          # skip the Go rebuild
@@ -42,9 +42,10 @@ if [ ! -f "$ROOT/phone-agent/.livekit-files-downloaded" ]; then
   touch "$ROOT/phone-agent/.livekit-files-downloaded"
 fi
 
-# ── 4. Start both, clean up on exit ─────────────────────────────────────────
+# ── 4. Start everything, clean up on exit ──────────────────────────────────
 API_PID=""
 AGENT_PID=""
+DASH_PID=""
 
 # Recursively signal a process and all its descendants (npm -> tsx -> node
 # worker -> job procs, or the go binary). Portable to macOS bash 3.2.
@@ -60,17 +61,21 @@ alive() { kill -0 "$1" 2>/dev/null; }
 cleanup() {
   trap - EXIT INT TERM
   log "shutting down"
+  killtree TERM "$DASH_PID"
   killtree TERM "$AGENT_PID"
   killtree TERM "$API_PID"
   # LiveKit idle job procs can dawdle on SIGTERM — give them ~3s, then SIGKILL.
   for _ in $(seq 1 6); do
     { [ -z "$AGENT_PID" ] || ! alive "$AGENT_PID"; } && \
-    { [ -z "$API_PID" ]   || ! alive "$API_PID";   } && break
+    { [ -z "$API_PID" ]   || ! alive "$API_PID";   } && \
+    { [ -z "$DASH_PID" ]  || ! alive "$DASH_PID";  } && break
     sleep 0.5
   done
+  killtree KILL "$DASH_PID"
   killtree KILL "$AGENT_PID"
   killtree KILL "$API_PID"
   pkill -KILL -f "$ROOT/phone-agent/src/agent.ts" 2>/dev/null || true
+  pkill -KILL -f "$ROOT/dashboard/node_modules/.bin/next" 2>/dev/null || true
   wait 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM HUP
@@ -97,8 +102,26 @@ log "starting phone agent  —  Ctrl-C stops everything"
                npm run --silent dev ) &
 AGENT_PID=$!
 
-# exit (triggering cleanup) as soon as either side stops
+# ── 5. Start the dashboard (optional) ─────────────────────────────────────
+# LiveKit creds come from phone-agent/.env automatically (dashboard/next.config.ts);
+# no dashboard/.env.local needed. run.sh never touches your credentials.
+if [ -d "$ROOT/dashboard/node_modules" ]; then
+  log "starting dashboard on http://localhost:3000"
+  ( cd "$ROOT/dashboard" \
+      && exec env BOOKING_API_URL="http://localhost:$BOOKING_PORT" \
+                 npm run --silent dev ) &
+  DASH_PID=$!
+else
+  log "dashboard: node_modules missing — skipping (cd dashboard && npm install)"
+fi
+
+# The API + agent are load-bearing; the dashboard is not. Exit (→ cleanup) when
+# either of the two core services stops.
 while kill -0 "$API_PID" 2>/dev/null && kill -0 "$AGENT_PID" 2>/dev/null; do
+  if [ -n "$DASH_PID" ] && ! kill -0 "$DASH_PID" 2>/dev/null; then
+    log "dashboard exited — API + agent still running"
+    DASH_PID=""
+  fi
   sleep 1
 done
-die "a process exited — stopping the rest"
+die "a core process exited — stopping the rest"

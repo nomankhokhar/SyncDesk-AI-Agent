@@ -13,6 +13,8 @@ func Register(r *gin.Engine, rc *controllers.ReservationController) {
 		api.GET("/reservations", rc.List)
 		api.GET("/reservations/:id", rc.Get)
 		api.POST("/reservations", rc.Create)
+		api.PUT("/reservations/:id", rc.Update)
+		api.DELETE("/reservations/:id", rc.Delete)
 		api.POST("/reservations/:id/cancel", rc.Cancel)
 		api.GET("/analysis", rc.Analysis)
 	}

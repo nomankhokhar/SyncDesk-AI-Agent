@@ -62,7 +62,7 @@ sequenceDiagram
     L->>L: inbound trunk accepts,<br/>dispatch rule creates room "call-xxxx"
     L->>A: dispatch job (empty metadata → inbound)
     A->>M: spawn cmd/mcp + initialize (stdio)
-    M-->>A: tools: create/cancel/list_reservations,<br/>get_booking_analysis
+    M-->>A: tools: create/update/cancel/list_reservations,<br/>get_booking_analysis
     A->>C: "Thanks for calling SyncDesk — how can I help?"
 
     loop every conversation turn
@@ -156,7 +156,7 @@ flowchart LR
         E[entry] --> BM[booking-mcp.ts:<br/>spawn + connect MCP client]
         BM --> LT[listTools]
         LT --> Reg["each MCP tool → llm.tool()<br/>(JSON Schema passed straight through)"]
-        Reg --> Claude[Claude sees tools:<br/>create/cancel/list_reservations,<br/>get_booking_analysis, endCall]
+        Reg --> Claude[Claude sees tools:<br/>create/update/cancel/list_reservations,<br/>get_booking_analysis, endCall]
     end
     subgraph Go["booking (Go)"]
         MCPS[cmd/mcp] --> REST[cmd/api REST]

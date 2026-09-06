@@ -74,6 +74,44 @@ func (c *ReservationController) Cancel(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, r)
 }
 
+// PUT /api/reservations/:id
+func (c *ReservationController) Update(ctx *gin.Context) {
+	id, err := strconv.Atoi(ctx.Param("id"))
+	if err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	var req models.CreateReservationRequest
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	r, err := c.service.Update(id, req)
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, services.ErrNotFound) {
+			status = http.StatusNotFound
+		}
+		ctx.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+	ctx.JSON(http.StatusOK, r)
+}
+
+// DELETE /api/reservations/:id
+func (c *ReservationController) Delete(ctx *gin.Context) {
+	id, err := strconv.Atoi(ctx.Param("id"))
+	if err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+	if err := c.service.Delete(id); err != nil {
+		ctx.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	ctx.Status(http.StatusNoContent)
+}
+
 // GET /api/analysis
 func (c *ReservationController) Analysis(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, c.service.Analysis())

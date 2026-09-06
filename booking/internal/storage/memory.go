@@ -55,3 +55,14 @@ func (s *Store) Update(r models.Reservation) {
 	defer s.mu.Unlock()
 	s.items[r.ID] = r
 }
+
+// Delete removes a reservation. Returns false if it did not exist.
+func (s *Store) Delete(id int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.items[id]; !ok {
+		return false
+	}
+	delete(s.items, id)
+	return true
+}
