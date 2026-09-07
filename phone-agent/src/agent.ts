@@ -209,9 +209,10 @@ ${isOutbound ? '- You initiated this call. After introducing yourself, state the
           `Hi, this is the ${BUSINESS_NAME} receptionist. I'm calling about a reservation — is now a good time?`,
         );
       } catch (err) {
-        console.error('Outbound call failed (busy / no answer / rejected):', err);
-        // Clean up the room so the worker doesn't hang
-        await ctx.deleteRoom();
+        console.error('Outbound call failed (busy / no answer / bad number):', err);
+        // Close the session — deleteRoomOnClose (above) tears the room down.
+        // (Calling ctx.deleteRoom() here too would double-delete and warn.)
+        await session.close().catch(() => {});
       }
     } else {
       // ── INBOUND: caller is already in the room, greet immediately ──
