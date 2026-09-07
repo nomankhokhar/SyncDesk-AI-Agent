@@ -1,6 +1,6 @@
-![SyncDesk Reservations](./docs/dashboard-reservations.png)
-![SyncDesk AI Calls](./docs/dashboard-ai-calls.png)
-![SyncDesk Live Call Monitor](./docs/dashboard-call-monitor.png)
+![SyncDesk Reservations](./images/dashboard-reservations.png)
+![SyncDesk AI Calls](./images/dashboard-ai-calls.png)
+![SyncDesk Live Call Monitor](./images/dashboard-call-monitor.png)
 
 # SyncDesk AI Receptionist
 
